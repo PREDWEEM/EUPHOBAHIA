@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from urllib.request import urlopen, Request
 
 # ================== Config de página (PRIMER st.*) ==================
-st.set_page_config(page_title="Predicción de Emergencia Agrícola EUPHO - BORDENAVE 2025", layout="wide")
+st.set_page_config(page_title="Predicción de Emergencia Agrícola EUPHO - BAHIA BLANCA 2025", layout="wide")
 
 # ================== Configuración visual y constantes ==================
 THR_BAJO_MEDIO = 0.02
@@ -19,7 +19,7 @@ COLOR_FALLBACK = "#808080"
 EMEAC_MIN_DEN = 5.0
 EMEAC_MAX_DEN = 15.0
 
-API_URL = "https://meteobahia.com.ar/scripts/forecast/for-bd.xml"
+API_URL = "https://meteobahia.com.ar/scripts/forecast/for-bb.xml"
 PRON_DIAS_API = 8  # usar solo los primeros 8 días (API y Excel)
 
 # ================== Horizonte móvil acotado ==================
@@ -144,7 +144,7 @@ def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
     return df[["Fecha","Julian_days","TMAX","TMIN","Prec"]]
 
 # ================== App ==================
-st.title("Predicción de Emergencia Agrícola EUPHO - BORDENAVE 2025")
+st.title("Predicción de Emergencia Agrícola EUPHO - BAHIA BLANCA 2025")
 
 st.sidebar.header("Configuración")
 umbral_usuario = st.sidebar.number_input("Umbral ajustable de EMEAC para 100%", 5.0, 15.0, 14.0, 0.01, format="%.2f")
