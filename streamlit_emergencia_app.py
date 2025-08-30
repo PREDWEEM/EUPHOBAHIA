@@ -245,8 +245,8 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     if df_win.empty:
         st.warning(f"{nombre}: no hay datos en {fecha_inicio.date()} → {fecha_fin.date()}")
         return
-    if len(df_win) < PRON_DIAS_API:
-        st.info(f"{nombre}: solo {len(df_win)} día(s) disponibles en esa ventana. Tip: si estás embebido, abre la app completa una vez para ‘despertarla’ y vuelve.")
+   # if len(df_win) < PRON_DIAS_API:
+   #  st.info(f"{nombre}: solo {len(df_win)} día(s) disponibles en esa ventana. Tip: si estás embebido, abre la app completa una vez para ‘despertarla’ y vuelve.")
 
     X_real = df_win[["Julian_days","TMAX","TMIN","Prec"]].to_numpy(float)
     fechas = df_win["Fecha"]
