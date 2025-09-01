@@ -1,4 +1,3 @@
-# update_meteo.py
 import os
 import sys
 import pytz
@@ -25,14 +24,13 @@ def today_local():
     return dt.datetime.now(TZ).date()
 
 def parse_api_xml(url: str):
-    """Parsea un XML diario de MeteoBahía a [{'date', 'tmax', 'tmin', 'prec', 'source'}]. Ajustá si tu XML difiere."""
+    """Parsea un XML diario de MeteoBahía a [{'date', 'tmax', 'tmin', 'prec', 'source'}]. Ajustar según formato real del XML."""
     req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urlopen(req, timeout=30) as r:
         xml_bytes = r.read()
     root = ET.fromstring(xml_bytes)
 
     out = []
-    # Suponemos nodos <day> con sub-entradas fecha/tmax/tmin/prec. Adaptar si es necesario.
     for day in root.iter():
         if day.tag.lower().endswith("day"):
             dstr, tmax, tmin, prec = None, None, None, None
@@ -42,12 +40,22 @@ def parse_api_xml(url: str):
                 if "date" in tag or "fecha" in tag or tag.endswith("daydate"):
                     dstr = txt
                 elif "tmax" in tag or "max" in tag:
-                    try: tmax = float(txt.replace(",", ".")); except: pass
+                    try:
+                        tmax = float(txt.replace(",", "."))
+                    except:
+                        pass
                 elif "tmin" in tag or "min" in tag:
-                    try: tmin = float(txt.replace(",", ".")); except: pass
+                    try:
+                        tmin = float(txt.replace(",", "."))
+                    except:
+                        pass
                 elif "prec" in tag or "rain" in tag or "pp" in tag:
-                    try: prec = float(txt.replace(",", ".")); except: pass
+                    try:
+                        prec = float(txt.replace(",", "."))
+                    except:
+                        pass
 
+            # Normalización de fecha
             d = None
             for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
                 if dstr:
@@ -56,10 +64,17 @@ def parse_api_xml(url: str):
                         break
                     except:
                         continue
+
             if d is None or tmax is None or tmin is None or prec is None:
                 continue
 
-            out.append({"date": d, "tmax": tmax, "tmin": tmin, "prec": prec, "source": "forecast"})
+            out.append({
+                "date": d,
+                "tmax": tmax,
+                "tmin": tmin,
+                "prec": prec,
+                "source": "forecast"
+            })
     return out
 
 def load_existing(csv_path: str) -> pd.DataFrame:
@@ -93,11 +108,13 @@ def main():
         fdf["jd"] = fdf["date"].apply(lambda d: d.timetuple().tm_yday)
         fdf["updated_at"] = pd.Timestamp.now(TZ)
     else:
-        # Sin datos nuevos: crear el índice de fechas y rellenar luego
+        # Sin datos: crear el rango con NaN y rellenar luego
         dates = pd.date_range(today, horizon_end, freq="D").date
         fdf = pd.DataFrame({
             "date": dates,
-            "tmax": np.nan, "tmin": np.nan, "prec": np.nan,
+            "tmax": np.nan,
+            "tmin": np.nan,
+            "prec": np.nan,
             "source": "forecast",
             "jd": [d.timetuple().tm_yday for d in dates],
             "updated_at": pd.Timestamp.now(TZ)
@@ -113,15 +130,14 @@ def main():
         else:
             merged = df.copy()
 
-    # Asegurar continuidad entre el mínimo del dataset y horizon_end
+    # Asegurar continuidad entre min(date) y horizon_end
     min_date = merged["date"].min() if not merged.empty else today
     full_idx = pd.date_range(min_date, horizon_end, freq="D").date
     merged = merged.set_index("date").reindex(full_idx).reset_index().rename(columns={"index":"date"})
 
-    # Completar columnas clave
     merged["jd"] = merged["date"].apply(lambda d: d.timetuple().tm_yday)
     merged["updated_at"] = merged["updated_at"].fillna(pd.Timestamp.now(TZ))
-    # Imputación conservadora para no dejar NaN (ajustable a tu preferencia)
+    # Imputación conservadora
     merged["tmax"] = merged["tmax"].fillna(method="ffill")
     merged["tmin"] = merged["tmin"].fillna(method="ffill")
     merged["prec"] = merged["prec"].fillna(0.0)
@@ -132,4 +148,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
