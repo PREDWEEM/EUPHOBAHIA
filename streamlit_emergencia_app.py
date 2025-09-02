@@ -13,7 +13,7 @@ st.set_page_config(page_title="Predicción de Emergencia Agrícola EUPHO - BAHIA
 def _get_query_params():
     # Compatibilidad: Streamlit moderno (st.query_params) y versiones previas
     try:
-        qp = st.query_params  # disponible en >=1.29 aprox.
+        qp = st.query_params  # >=1.29 aprox.
         if isinstance(qp, dict):
             return {k: [v] if isinstance(v, str) else v for k, v in qp.items()}
         return dict(qp)
@@ -56,26 +56,16 @@ EMEAC_MIN_DEN = 5.0
 EMEAC_MAX_DEN = 15.0
 
 API_URL = "https://meteobahia.com.ar/scripts/forecast/for-bb.xml"
-PRON_DIAS_API = 8  # usar solo los primeros 8 días (API y Excel)
+PRON_DIAS_API = 8  # sigue disponible si lo necesitás en otros flujos (no se usa para visualizar)
 
-# ================== Horizonte móvil acotado ==================
-# Ventana permitida para análisis (fijo)
+# ================== Ventana fija para visualización ==================
 VENTANA_MIN = pd.Timestamp("2025-09-01")
-VENTANA_MAX = pd.Timestamp("2026-01-01")  # inclusive
+VENTANA_MAX = pd.Timestamp("2026-01-01")  # inclusive para ejes
 
-# Fecha actual
-HOY = pd.Timestamp.now().normalize()
+START_SERIE = VENTANA_MIN
+END_SERIE   = VENTANA_MAX
 
-# Horizonte móvil: hoy → hoy + 7 días (8 días en total)
-rango_movil_inicio = HOY
-rango_movil_fin = HOY + pd.Timedelta(days=7)
-
-# Acotar a la ventana permitida
-fecha_inicio = max(rango_movil_inicio, VENTANA_MIN)
-fecha_fin    = min(rango_movil_fin,    VENTANA_MAX)
-
-# Mostrar al usuario
-st.caption(f"Horizonte de análisis: {fecha_inicio.date()} → {fecha_fin.date()} (máx. 8 días dentro de la ventana permitida)")
+st.caption(f"Serie visible: {START_SERIE.date()} → {END_SERIE.date()} (se muestra TODO lo disponible en ese intervalo)")
 
 # ================== Modelo ANN (pesos embebidos) ==================
 class PracticalANNModel:
@@ -100,6 +90,8 @@ class PracticalANNModel:
             2.703778, 4.776029
         ], dtype=float)
         self.bias_out = -5.394722
+
+        # Orden esperado: [Julian_days, TMAX, TMIN, Prec]
         self.input_min = np.array([1.0, 7.7, -3.5, 0.0], dtype=float)
         self.input_max = np.array([148.0, 38.5, 23.5, 59.9], dtype=float)
 
@@ -124,6 +116,8 @@ class PracticalANNModel:
         emerrel_pred = np.array([self._predict_single(x) for x in X_norm], dtype=float)
         emerrel_desnorm = self.desnormalize_output(emerrel_pred)
         emerrel_cumsum = np.cumsum(emerrel_desnorm)
+
+        # Normaliza por máximo absoluto para EMEAC (ajusta a tu validación)
         valor_max_emeac = 8.05
         emer_ac = emerrel_cumsum / valor_max_emeac
         emerrel_diff = np.diff(emer_ac, prepend=0.0)
@@ -172,19 +166,30 @@ def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
         fecha = pd.to_datetime(fecha_str, errors="coerce")
         if pd.isna(fecha):
             continue
+
         def _to_float_attr(tag):
-            if tag is None: return None
+            if tag is None:
+                return None
             s = str(tag.attrib.get("value", "")).strip().replace(",", ".")
-            try: return float(s)
-            except: return None
+            try:
+                return float(s)
+            except:
+                return None
+
         tmax = _to_float_attr(tmax_tag)
         tmin = _to_float_attr(tmin_tag)
         prec = _to_float_attr(precip_tag) or 0.0
+
         rows.append({"Fecha": fecha.normalize(), "TMAX": tmax, "TMIN": tmin, "Prec": prec})
+
     df = pd.DataFrame(rows).drop_duplicates("Fecha").sort_values("Fecha").reset_index(drop=True)
+
+    # Interpolaciones suaves
     for col in ["TMAX", "TMIN", "Prec"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").interpolate(limit_direction="both")
     df["Prec"] = df["Prec"].fillna(0).clip(lower=0)
+
+    # Base juliana respecto de 01-09-2025
     base = pd.Timestamp("2025-09-01")
     df["Julian_days"] = (df["Fecha"] - base).dt.days + 1
     return df[["Fecha","Julian_days","TMAX","TMIN","Prec"]]
@@ -216,12 +221,8 @@ if fuente == "Subir Excel (.xlsx)":
 @st.cache_resource
 def get_model():
     return PracticalANNModel()
-modelo = get_model()
 
-def _clasificar_local(v: float) -> str:
-    if v < THR_BAJO_MEDIO: return "Bajo"
-    elif v <= THR_MEDIO_ALTO: return "Medio"
-    else: return "Alto"
+modelo = get_model()
 
 def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     req = {"Julian_days","TMAX","TMIN","Prec"}
@@ -229,33 +230,46 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         st.warning(f"{nombre}: faltan columnas {req - set(df.columns)}")
         return
 
+    # Normalizar Fecha si no viene
     if "Fecha" not in df.columns:
         base = pd.Timestamp("2025-09-01")
         jd = pd.to_numeric(df["Julian_days"], errors="coerce")
         df["Fecha"] = (base + pd.to_timedelta(jd - 1, unit="D")).dt.normalize()
     df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
 
-    m_win = (df["Fecha"]>=fecha_inicio) & (df["Fecha"]<=fecha_fin)
-    df_win = (df.loc[m_win]
-                .sort_values("Fecha")
-                .drop_duplicates("Fecha")
-                .head(PRON_DIAS_API)
-                .reset_index(drop=True))
+    # === CLAVE: mostrar la serie COMPLETA desde START_SERIE hasta END_SERIE ===
+    m_vis = (df["Fecha"] >= START_SERIE) & (df["Fecha"] <= END_SERIE)
+    df_vis = (
+        df.loc[m_vis]
+          .sort_values("Fecha")
+          .drop_duplicates("Fecha")
+          .reset_index(drop=True)
+    )
 
-    if df_win.empty:
-        st.warning(f"{nombre}: no hay datos en {fecha_inicio.date()} → {fecha_fin.date()}")
+    if df_vis.empty:
+        st.warning(f"{nombre}: no hay datos en {START_SERIE.date()} → {END_SERIE.date()}")
         return
-   # if len(df_win) < PRON_DIAS_API:
-   #  st.info(f"{nombre}: solo {len(df_win)} día(s) disponibles en esa ventana. Tip: si estás embebido, abre la app completa una vez para ‘despertarla’ y vuelve.")
 
-    X_real = df_win[["Julian_days","TMAX","TMIN","Prec"]].to_numpy(float)
-    fechas = df_win["Fecha"]
+    # --- Opcional: reindex diario para asegurar continuidad visual (ffill) ---
+    # full_idx = pd.date_range(START_SERIE, END_SERIE, freq="D")
+    # df_vis = (
+    #     df_vis.set_index("Fecha")
+    #           .reindex(full_idx)
+    #           .rename_axis("Fecha")
+    #           .reset_index()
+    #           .ffill()
+    # )
+
+    # Entradas del modelo (SIN recorte a 8 días)
+    X_real = df_vis[["Julian_days","TMAX","TMIN","Prec"]].to_numpy(float)
+    fechas = df_vis["Fecha"]
     pred = modelo.predict(X_real)
 
     pred["Fecha"] = fechas
-    pred["Julian_days"] = df_win["Julian_days"].to_numpy()
+    pred["Julian_days"] = df_vis["Julian_days"].to_numpy()
     pred["EMERREL acumulado"] = pred["EMERREL(0-1)"].cumsum()
 
+    # Bandas EMEAC
     pred["EMEAC (0-1) - mínimo"]    = pred["EMERREL acumulado"] / EMEAC_MIN_DEN
     pred["EMEAC (0-1) - máximo"]    = pred["EMERREL acumulado"] / EMEAC_MAX_DEN
     pred["EMEAC (0-1) - ajustable"] = pred["EMERREL acumulado"] / umbral_usuario
@@ -282,7 +296,7 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         name="EMERREL"
     )
     fig_er.add_scatter(x=pred["Fecha"], y=pred["EMERREL_MA5"], mode="lines", name="MA5")
-    fig_er.update_xaxes(range=["2025-09-01", "2026-01-01"], dtick="M1", tickformat="%b")
+    fig_er.update_xaxes(range=[str(START_SERIE.date()), str(END_SERIE.date())], dtick="M1", tickformat="%b")
     st.plotly_chart(fig_er, use_container_width=True)
 
     # === EMERGENCIA ACUMULADA DIARIA ===
@@ -292,11 +306,11 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     fig_acc.add_scatter(x=pred["Fecha"], y=pred["EMEAC (%) - máximo"], mode="lines", line=dict(width=0), fill="tonexty", name="EMEAC máx")
     fig_acc.add_scatter(x=pred["Fecha"], y=pred["EMEAC (%) - ajustable"], mode="lines", line=dict(width=2.5), name=f"Ajustable /{umbral_usuario:.2f}")
     fig_acc.update_yaxes(range=[0, 100])
-    fig_acc.update_xaxes(range=["2025-09-01", "2026-01-01"], dtick="M1", tickformat="%b")
+    fig_acc.update_xaxes(range=[str(START_SERIE.date()), str(END_SERIE.date())], dtick="M1", tickformat="%b")
     st.plotly_chart(fig_acc, use_container_width=True)
 
-    # === Tabla ===
-    st.subheader(f"Resultados (sep → ene) - {nombre}")
+    # === Tabla (toda la serie visible) ===
+    st.subheader(f"Resultados (serie completa) - {nombre}")
     tabla = pred[["Fecha","Julian_days","Nivel_Emergencia_relativa"]].copy()
     tabla["EMEAC (%)"] = pred["EMEAC (%) - ajustable"]
     iconos = {"Bajo": "🟢 Bajo", "Medio": "🟠 Medio", "Alto": "🔴 Alto"}
@@ -329,12 +343,14 @@ else:
     else:
         # 2) Validar vacío antes de graficar
         if df_api.empty:
-            st.error("La API no devolvió datos utilizables en la ventana seleccionada.")
+            st.error("La API no devolvió datos utilizables.")
         else:
-            # 3) Recortar y mostrar resultados (errores de gráficos NO se confunden con la API)
-            df_api = (df_api.sort_values("Fecha")
-                            .drop_duplicates("Fecha")
-                            .head(PRON_DIAS_API)
-                            .reset_index(drop=True))
-            st.success(f"API MeteoBahia: {df_api['Fecha'].min().date()} → {df_api['Fecha'].max().date()} · {len(df_api)} días (recortado a {PRON_DIAS_API})")
+            # 3) Visualizar la serie COMPLETA dentro de START_SERIE → END_SERIE (SIN .head(PRON_DIAS_API))
+            df_api = (
+                df_api.sort_values("Fecha")
+                      .drop_duplicates("Fecha")
+                      .reset_index(drop=True)
+            )
+            st.success(f"API MeteoBahia: {df_api['Fecha'].min().date()} → {df_api['Fecha'].max().date()} · {len(df_api)} día(s)")
             procesar_y_mostrar(df_api, "MeteoBahia_API")
+
