@@ -240,7 +240,7 @@ def update_history(df_new: pd.DataFrame, freeze_existing: bool = False) -> pd.Da
     return merged
 
 # ================== App (UI) ==================
-st.title("Predicción de Emergencia Agrícola EUPHO – Serie Persistente (sin reindex)")
+st.title("Predicción de Emergencia Agrícola EUPHO –BAHIA BLANCA")
 
 st.sidebar.header("Configuración")
 umbral_usuario = st.sidebar.number_input(
