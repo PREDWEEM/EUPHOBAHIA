@@ -14,7 +14,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 # ================== Config de página ==================
-st.set_page_config(page_title="Predicción de Emergencia Agrícola EUPHO – Persistente", layout="wide")
+st.set_page_config(page_title="Predicción de Emergencia Agrícola EUPHO – BAHIA BLANCA", layout="wide")
 
 # ================== UX: embebido y recarga ==================
 def _get_query_params():
