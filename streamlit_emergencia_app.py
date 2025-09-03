@@ -2,6 +2,7 @@
 # streamlit_emergencia_app_persistente_sin_reindex.py
 # EUPHO – Serie persistente (no borra días previos), SIN reindex (no inventa fechas),
 # ventana de gráficos fija: 2025-09-01 → 2026-01-01
+# EMERREL: eje Y fijo 0–0.08 · EMEAC: eje Y fijo 0–100%
 
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -334,6 +335,7 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         range=[str(VENTANA_MIN.date()), str(VENTANA_MAX.date())],
         dtick="M1", tickformat="%b"
     )
+    fig_er.update_yaxes(range=[0, 0.08])  # EMERREL: Y fijo 0–0.08
     st.plotly_chart(fig_er, use_container_width=True)
 
     st.subheader(f"EMERGENCIA ACUMULADA DIARIA — {nombre}")
@@ -341,7 +343,7 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     fig_acc.add_scatter(x=pred["Fecha"], y=pred["EMEAC (%) - mínimo"], mode="lines", line=dict(width=0), name="EMEAC mín")
     fig_acc.add_scatter(x=pred["Fecha"], y=pred["EMEAC (%) - máximo"], mode="lines", line=dict(width=0), fill="tonexty", name="EMEAC máx")
     fig_acc.add_scatter(x=pred["Fecha"], y=pred["EMEAC (%) - ajustable"], mode="lines", line=dict(width=2.5), name=f"Ajustable /{umbral_usuario:.2f}")
-    fig_acc.update_yaxes(range=[0, 100])
+    fig_acc.update_yaxes(range=[0, 100])  # EMEAC: Y fijo 0–100%
     fig_acc.update_xaxes(
         range=[str(VENTANA_MIN.date()), str(VENTANA_MAX.date())],
         dtick="M1", tickformat="%b"
