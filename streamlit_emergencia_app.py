@@ -1,13 +1,8 @@
 # -*- coding: utf-8 -*-
 # streamlit_emergencia_app_persistente_sin_reindex.py
-# EUPHO – Serie persistente (no borra días previos) y SIN reindex (no inventa fechas)
-# - Lee la API MeteoBahia (for-bb.xml) y toma el pronóstico completo disponible (hasta 14 días)
-# - Consolida en meteo_history.csv para conservar días anteriores
-# - Procesa y muestra SOLO fechas reales (histórico ∪ API), sin crear días fuera del horizonte
-# - Basado en tu app original (modelo, normalización, julianos desde 2025-09-01)
+# EUPHO – Serie persistente (no borra días previos), SIN reindex (no inventa fechas),
+# ventana de gráficos fija: 2025-09-01 → 2026-01-01
 
-import os
-import io
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.request import urlopen, Request
@@ -39,7 +34,6 @@ def is_embedded() -> bool:
     return val in {"1", "true", "yes"}
 
 def app_base_url() -> str:
-    # Ajusta si querés linkear a tu app principal
     return "https://appemergenciapy-lscuxqt2j3sa9yjrwgyqnh.streamlit.app/"
 
 if is_embedded():
@@ -55,7 +49,7 @@ if is_embedded():
                 pass
             st.rerun()
 
-# ================== Constantes visuales y de modelo ==================
+# ================== Constantes visuales y modelo ==================
 THR_BAJO_MEDIO = 0.02
 THR_MEDIO_ALTO = 0.079
 COLOR_MAP = {"Bajo": "#2ca02c", "Medio": "#ff7f0e", "Alto": "#d62728"}
@@ -64,23 +58,23 @@ COLOR_FALLBACK = "#808080"
 EMEAC_MIN_DEN = 5.0   # Banda inferior
 EMEAC_MAX_DEN = 15.0  # Banda superior
 
-# URL Bahía Blanca (tu base usa for-bb.xml y procesa todo el bloque de la API):contentReference[oaicite:2]{index=2}
+# API Bahía Blanca
 API_URL = "https://meteobahia.com.ar/scripts/forecast/for-bb.xml"
 
-# Ventana conceptual (solo se usa para recorte; NO crea días)
+# Ventana conceptual (para recorte y para los ejes de los gráficos)
 VENTANA_MIN = pd.Timestamp("2025-09-01")
 VENTANA_MAX = pd.Timestamp("2026-01-01")
 START_SERIE = VENTANA_MIN
 END_SERIE   = VENTANA_MAX
-st.caption(f"Serie visible (recorte conceptual, sin inventar fechas): {START_SERIE.date()} → {END_SERIE.date()}")
+st.caption(f"Ventana fija en gráficos: {START_SERIE.date()} → {END_SERIE.date()} (se dibujan solo fechas con datos reales)")
 
-# Archivo local para persistir consolidado (histórico ∪ pronósticos)
+# Archivo local para persistir el consolidado (histórico ∪ pronósticos)
 HISTORY_PATH = Path("meteo_history.csv")
 
-# ================== Modelo ANN (idéntico a tu app base) ==================
+# ================== Modelo ANN ==================
 class PracticalANNModel:
     def __init__(self):
-        # Pesos embebidos y normalización como en tu script base:contentReference[oaicite:3]{index=3}
+        # Pesos/normalización (ajustar si corresponde a tu último entrenamiento)
         self.IW = np.array([
             [-2.924160, -7.896739, -0.977000, 0.554961, 9.510761, 8.739410, 10.592497, 21.705275, -2.532038, 7.847811,
              -3.907758, 13.933289, 3.727601, 3.751941, 0.639185, -0.758034, 1.556183, 10.458917, -1.343551, -14.721089],
@@ -102,7 +96,7 @@ class PracticalANNModel:
         ], dtype=float)
         self.bias_out = -5.394722
 
-        # Orden esperado y normalización (Julian_days, TMAX, TMIN, Prec):contentReference[oaicite:4]{index=4}
+        # Orden esperado y normalización (Julian_days, TMAX, TMIN, Prec)
         self.input_min = np.array([1.0, 7.7, -3.5, 0.0], dtype=float)
         self.input_max = np.array([148.0, 38.5, 23.5, 59.9], dtype=float)
 
@@ -127,7 +121,7 @@ class PracticalANNModel:
         emerrel_desnorm = self.desnormalize_output(emerrel_pred)
         emerrel_cumsum = np.cumsum(emerrel_desnorm)
 
-        # Normalización para EMEAC (ajusta a tu validación)
+        # Normalización para EMEAC (ajustar a tu validación)
         valor_max_emeac = 8.05
         emer_ac = emerrel_cumsum / valor_max_emeac
         emerrel_diff = np.diff(emer_ac, prepend=0.0)
@@ -140,14 +134,13 @@ class PracticalANNModel:
         riesgo = np.array([clasificar(v) for v in emerrel_diff], dtype=object)
         return pd.DataFrame({"EMERREL(0-1)": emerrel_diff, "Nivel_Emergencia_relativa": riesgo})
 
-# Cache del modelo
 @st.cache_resource
 def get_model():
     return PracticalANNModel()
 
 modelo = get_model()
 
-# ================== Helpers API (como en tu base) ==================
+# ================== Helpers API ==================
 @st.cache_data(ttl=15*60, show_spinner=False)
 def _fetch_xml(url: str) -> bytes:
     req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Streamlit MeteoBahia)"})
@@ -194,12 +187,12 @@ def parse_meteobahia_xml(xml_bytes: bytes) -> pd.DataFrame:
 
     df = pd.DataFrame(rows).drop_duplicates("Fecha").sort_values("Fecha").reset_index(drop=True)
 
-    # Interpolaciones SUAVES en columnas numéricas existentes (no crea fechas)
+    # Interpolaciones SUAVES en columnas numéricas existentes (no crea fechas nuevas)
     for col in ["TMAX", "TMIN", "Prec"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").interpolate(limit_direction="both")
     df["Prec"] = df["Prec"].fillna(0).clip(lower=0)
 
-    # Base juliana respecto de 2025-09-01 (tu elección en la app original):contentReference[oaicite:5]{index=5}
+    # Base juliana respecto de 2025-09-01
     base = pd.Timestamp("2025-09-01")
     df["Julian_days"] = (df["Fecha"] - base).dt.days + 1
     return df[["Fecha","Julian_days","TMAX","TMIN","Prec"]]
@@ -210,7 +203,7 @@ def load_history() -> pd.DataFrame:
         try:
             dfh = pd.read_csv(HISTORY_PATH, parse_dates=["Fecha"])
             dfh["Fecha"] = pd.to_datetime(dfh["Fecha"]).dt.normalize()
-            # Recalcular julianos por consistencia con base 2025-09-01
+            # Recalcular julianos por consistencia
             base = pd.Timestamp("2025-09-01")
             dfh["Julian_days"] = (dfh["Fecha"] - base).dt.days + 1
             for c in ["TMAX","TMIN","Prec"]:
@@ -221,21 +214,27 @@ def load_history() -> pd.DataFrame:
             pass
     return pd.DataFrame(columns=["Fecha","Julian_days","TMAX","TMIN","Prec"])
 
-def update_history(df_new: pd.DataFrame) -> pd.DataFrame:
+def update_history(df_new: pd.DataFrame, freeze_existing: bool = False) -> pd.DataFrame:
     """
-    Fusiona history existente con df_new (prioriza df_new en colisiones de fecha).
-    NO crea fechas nuevas: el consolidado es la unión de fechas reales.
+    Fusiona history existente con df_new.
+    - freeze_existing=False (por defecto): la API más reciente PISA fechas repetidas (keep='last').
+    - freeze_existing=True: NO sobrescribe fechas ya guardadas; solo agrega fechas nuevas.
     """
     dfh = load_history()
     if dfh.empty:
         merged = df_new.copy()
     else:
-        merged = (
-            pd.concat([dfh, df_new], ignore_index=True)
-              .sort_values("Fecha")
-              .drop_duplicates(subset=["Fecha"], keep="last")  # lo más reciente de la API pisa
-              .reset_index(drop=True)
-        )
+        if freeze_existing:
+            nuevas = df_new[~df_new["Fecha"].isin(dfh["Fecha"])]
+            merged = pd.concat([dfh, nuevas], ignore_index=True)
+        else:
+            merged = (
+                pd.concat([dfh, df_new], ignore_index=True)
+                  .sort_values("Fecha")
+                  .drop_duplicates(subset=["Fecha"], keep="last")
+            )
+
+    merged = merged.sort_values("Fecha").drop_duplicates("Fecha").reset_index(drop=True)
     merged.to_csv(HISTORY_PATH, index=False)
     return merged
 
@@ -243,7 +242,13 @@ def update_history(df_new: pd.DataFrame) -> pd.DataFrame:
 st.title("Predicción de Emergencia Agrícola EUPHO – Serie Persistente (sin reindex)")
 
 st.sidebar.header("Configuración")
-umbral_usuario = st.sidebar.number_input("Umbral ajustable de EMEAC para 100%", 5.0, 15.0, 14.0, 0.01, format="%.2f")
+umbral_usuario = st.sidebar.number_input(
+    "Umbral ajustable de EMEAC para 100%", 5.0, 15.0, 14.0, 0.01, format="%.2f"
+)
+FREEZE_HISTORY = st.sidebar.checkbox(
+    "Congelar pronósticos previos (no sobrescribir)", value=True,
+    help="Si está activado, cada corrida queda congelada: no se pisan valores previos para la misma fecha."
+)
 fuente = st.sidebar.radio("Fuente de datos meteorológicos", ["API MeteoBahia", "Subir Excel (.xlsx)"], index=0)
 
 with st.sidebar:
@@ -274,7 +279,7 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
           .reset_index(drop=True)
     )
 
-    # Recorte por ventana conceptual (sin reindex)
+    # Recorte por ventana conceptual (sin reindex; NO inventar días)
     m_vis = (df["Fecha"] >= START_SERIE) & (df["Fecha"] <= END_SERIE)
     df_vis = df.loc[m_vis].copy()
 
@@ -282,7 +287,7 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         st.warning(f"{nombre}: no hay datos en {START_SERIE.date()} → {END_SERIE.date()}")
         return
 
-    # Sanitizado suave (no inventa valores fuera de filas reales)
+    # Sanitizado suave (sin inventar valores)
     for c in ["TMAX","TMIN","Prec"]:
         df_vis[c] = pd.to_numeric(df_vis[c], errors="coerce")
     df_vis["Prec"] = df_vis["Prec"].fillna(0).clip(lower=0)
@@ -307,16 +312,12 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     for col in ["EMEAC (0-1) - mínimo","EMEAC (0-1) - máximo","EMEAC (0-1) - ajustable"]:
         pred[col.replace("(0-1)","(%)")] = (pred[col]*100).clip(0,100)
 
-    # Regla estética: cuando EMEAC ajustable < 10%, el nivel se fuerza a "Bajo" (como en tu base):contentReference[oaicite:6]{index=6}
+    # Regla estética: cuando EMEAC ajustable < 10%, forzar "Bajo"
     pred.loc[pred["EMEAC (%) - ajustable"] < 10.0, "Nivel_Emergencia_relativa"] = "Bajo"
 
     pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(5, 1).mean()
 
-    # ====== Rango de ejes (solo datos reales) ======
-    xmin = max(START_SERIE, pred["Fecha"].min())
-    xmax = min(END_SERIE, pred["Fecha"].max())
-
-    # ====== Figuras ======
+    # ====== Figuras (ejes X fijos a la ventana completa) ======
     st.subheader(f"EMERGENCIA RELATIVA DIARIA — {nombre}")
     colores = pred["Nivel_Emergencia_relativa"].map(COLOR_MAP).fillna(COLOR_FALLBACK).tolist()
     fig_er = go.Figure()
@@ -329,7 +330,10 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
         name="EMERREL"
     )
     fig_er.add_scatter(x=pred["Fecha"], y=pred["EMERREL_MA5"], mode="lines", name="MA5")
-    fig_er.update_xaxes(range=[str(xmin.date()), str(xmax.date())], dtick="M1", tickformat="%b")
+    fig_er.update_xaxes(
+        range=[str(VENTANA_MIN.date()), str(VENTANA_MAX.date())],
+        dtick="M1", tickformat="%b"
+    )
     st.plotly_chart(fig_er, use_container_width=True)
 
     st.subheader(f"EMERGENCIA ACUMULADA DIARIA — {nombre}")
@@ -338,7 +342,10 @@ def procesar_y_mostrar(df: pd.DataFrame, nombre: str):
     fig_acc.add_scatter(x=pred["Fecha"], y=pred["EMEAC (%) - máximo"], mode="lines", line=dict(width=0), fill="tonexty", name="EMEAC máx")
     fig_acc.add_scatter(x=pred["Fecha"], y=pred["EMEAC (%) - ajustable"], mode="lines", line=dict(width=2.5), name=f"Ajustable /{umbral_usuario:.2f}")
     fig_acc.update_yaxes(range=[0, 100])
-    fig_acc.update_xaxes(range=[str(xmin.date()), str(xmax.date())], dtick="M1", tickformat="%b")
+    fig_acc.update_xaxes(
+        range=[str(VENTANA_MIN.date()), str(VENTANA_MAX.date())],
+        dtick="M1", tickformat="%b"
+    )
     st.plotly_chart(fig_acc, use_container_width=True)
 
     # ====== Tabla ======
@@ -380,8 +387,8 @@ if fuente == "API MeteoBahia":
                 procesar_y_mostrar(df_hist, "Persistido (sin API)")
         else:
             st.success(f"API MeteoBahia: {df_api['Fecha'].min().date()} → {df_api['Fecha'].max().date()} · {len(df_api)} día(s)")
-            # 1) Actualizar history con el nuevo bloque de pronóstico
-            df_merged = update_history(df_api)
+            # 1) Actualizar history con el nuevo bloque de pronóstico (con opción de congelar)
+            df_merged = update_history(df_api, freeze_existing=FREEZE_HISTORY)
             st.caption(f"History consolidado: {df_merged['Fecha'].min().date()} → {df_merged['Fecha'].max().date()} · {len(df_merged)} día(s)")
             # 2) Mostrar usando la serie consolidada (no se borran fechas antiguas; no se crean fechas nuevas)
             procesar_y_mostrar(df_merged, "MeteoBahia + History")
