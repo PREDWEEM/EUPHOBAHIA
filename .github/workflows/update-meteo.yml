@@ -38,7 +38,7 @@ jobs:
       - name: Run update_meteo.py
         env:
           # Ajustá si tu endpoint fuera distinto
-          METEOBAHIA_URL: https://meteobahia.com.ar/scripts/forecast/for-bd.xml
+          METEOBAHIA_URL: https://meteobahia.com.ar/scripts/forecast/for-bb.xml
           TIMEZONE: America/Argentina/Buenos_Aires
           # Salidas: repo + app (tu script ya las usa)
           GH_PATH: data/meteo_daily.csv
