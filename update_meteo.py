@@ -19,7 +19,7 @@ from urllib.error import HTTPError, URLError
 from pathlib import Path
 
 # ================== Config ==================
-API_URL         = os.getenv("METEOBAHIA_URL", "https://meteobahia.com.ar/scripts/forecast/for-bd.xml")
+API_URL         = os.getenv("METEOBAHIA_URL", "https://meteobahia.com.ar/scripts/forecast/for-bb.xml")
 PRON_DIAS_API   = int(os.getenv("PRON_DIAS_API", "8"))   # hoy + 7
 TZ              = pytz.timezone(os.getenv("TIMEZONE", "America/Argentina/Buenos_Aires"))
 
