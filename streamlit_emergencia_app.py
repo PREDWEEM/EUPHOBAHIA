@@ -141,6 +141,16 @@ for _c in ["EMERREL(0-1)", "EMEAC(0-1)"]:
     if _c in pred.columns:
         pred[_c] = pd.to_numeric(pred[_c], errors="coerce")
 pred["EMERREL(0-1)"] = pred["EMERREL(0-1)"].fillna(0)
+# --- Garantía EMEAC: si falta o es nulo, lo recalculo desde EMERREL ---
+if "EMEAC(0-1)" not in pred.columns or pred["EMEAC(0-1)"].isna().all():
+    _acc = pred["EMERREL(0-1)"].cumsum()
+    _den = 8.05  # máximo de referencia
+    pred["EMEAC(0-1)"] = (_acc / _den).clip(lower=0)
+else:
+    pred["EMEAC(0-1)"] = pd.to_numeric(pred["EMEAC(0-1)"], errors="coerce").fillna(0)
+
+pred["EMEAC(%)"] = (pred["EMEAC(0-1)"] * 100).clip(0, 100)
+
 pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1).mean()
 pred["EMEAC(%)"] = (pred["EMEAC(0-1)"] * 100).clip(0, 100)
 
