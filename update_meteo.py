@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-# update_meteo.py — asegura ventana COMPLETA 2025-09-01 → 2026-01-01 y no pisa pasado
-# Úsalo para mantener meteo_history.csv siempre completo. La app luego usa SOLO este archivo.
+# update_meteo.py — MERGE SIN VENTANA FIJA (no crea fechas artificiales)
+# Reglas:
+# - Conserva todas las filas existentes en meteo_history.csv tal como están.
+# - Agrega/actualiza SOLO fechas provistas por la API (p. ej., próximos 8 días).
+# - NO reindexa ni completa rangos; no extiende hasta una fecha fija.
+
 import os
-import logging
 from pathlib import Path
 from datetime import date, datetime, timedelta
 
@@ -14,16 +17,11 @@ import xml.etree.ElementTree as ET
 TZ = os.getenv("TIMEZONE","America/Argentina/Buenos_Aires")
 LOCAL_TZ = pytz.timezone(TZ)
 
-WINDOW_START = date(2025,9,1)
-WINDOW_END_EXCL = date(2026,1,1)  # exclusivo
 PRON_DIAS_API = int(os.getenv("PRON_DIAS_API","8"))
 METEOBAHIA_URL = os.getenv("METEOBAHIA_URL","https://meteobahia.com.ar/scripts/forecast/for-bd.xml")
 APP_HISTORY_PATH = Path(os.getenv("APP_HISTORY_PATH","meteo_history.csv"))
 GH_PATH = Path(os.getenv("GH_PATH","data/meteo_daily.csv"))
 GH_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("update_meteo")
 
 def _num(x):
     try:
@@ -62,7 +60,6 @@ def parse_xml(xml_bytes: bytes, limit_days: int) -> pd.DataFrame:
                             if (child.text or "").strip(): return child.text.strip()
                             v = child.attrib.get("value")
                             if v: return v.strip()
-                    # recursivo superficial
                     for child in list(node):
                         for g in list(child):
                             if g.tag.lower() in names:
@@ -76,7 +73,6 @@ def parse_xml(xml_bytes: bytes, limit_days: int) -> pd.DataFrame:
                 pr = get_text({"prec","lluvia","pp","rain","precipitacion"})
                 prec = _num(pr.replace("mm","")) if pr else None
                 rows.append({"date": fdate, "tmin": tmin, "tmax": tmax, "prec": prec})
-
     df = pd.DataFrame(rows).drop_duplicates("date").sort_values("date")
     if df.empty: return df
     today = date.today()
@@ -96,59 +92,34 @@ def now_local_iso():
     return datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S%z")
 
 def main():
-    log.info("=== UPDATE METEO (ventana fija 2025-09-01 → 2026-01-01 excl.) ===")
     hist = load_history(APP_HISTORY_PATH)
-    # descargar api
+    # Obtener API (si falla, no tocamos nada)
     try:
         resp = requests.get(METEOBAHIA_URL, headers={"User-Agent":"Mozilla/5.0"}, timeout=30)
         resp.raise_for_status()
         api_df = parse_xml(resp.content, PRON_DIAS_API)
-        log.info(f"API días: {len(api_df)}")
-    except Exception as e:
-        log.warning(f"No se pudo obtener API: {e}")
+    except Exception:
         api_df = pd.DataFrame(columns=["date","tmin","tmax","prec"])
 
-    # índice fijo
-    idx = pd.date_range(WINDOW_START, WINDOW_END_EXCL - timedelta(days=1), freq="D").date
-    base = pd.DataFrame({"date": idx})
-
-    for d in (hist, api_df):
-        if not d.empty:
-            d["date"] = pd.to_datetime(d["date"]).dt.date
-
-    # conservar pasado (congelado) y usar API en futuro
-    today = date.today()
     if not hist.empty:
-        hist = hist[hist["date"].between(WINDOW_START, WINDOW_END_EXCL - timedelta(days=1))]
-    fut_api = pd.DataFrame(columns=["date","tmax","tmin","prec","source","updated_at"])
+        hist["date"] = pd.to_datetime(hist["date"]).dt.date
     if not api_df.empty:
-        fut_api = api_df.copy()
-        fut_api["source"] = "forecast"
-        fut_api["updated_at"] = now_local_iso()
-        fut_api = fut_api[fut_api["date"] >= today]
+        api_df["date"] = pd.to_datetime(api_df["date"]).dt.date
+        api_df["source"] = "forecast"
+        api_df["updated_at"] = now_local_iso()
 
-    merged = base.merge(hist, on="date", how="left")
-    if not fut_api.empty:
-        merged = merged.merge(fut_api, on="date", how="left", suffixes=("","_api"))
-        for c in ["tmax","tmin","prec","source","updated_at"]:
-            is_future = merged["date"] >= today
-            merged[c] = merged[c].where(~is_future | merged[f"{c}_api"].isna(), merged[f"{c}_api"])
-        merged = merged.drop(columns=[c for c in merged.columns if c.endswith("_api")], errors="ignore")
+    # Merge SÓLO en fechas de la API (no se crean fechas fuera de lo que existe + API)
+    out = hist.copy()
+    if not api_df.empty:
+        # Para cada fecha de API, si existe en hist → actualizar; si no existe → agregar (porque ES dato provisto)
+        out = pd.concat([out[~out["date"].isin(api_df["date"])], api_df], ignore_index=True)
+        out = out.sort_values("date")
 
-    merged = merged.sort_values("date")
-    for c in ["tmax","tmin"]:
-        merged[c] = pd.to_numeric(merged[c], errors="coerce").ffill()
-    merged["prec"] = pd.to_numeric(merged["prec"], errors="coerce").fillna(0.0)
-    merged["source"] = merged["source"].fillna("forecast")
-    merged["updated_at"] = merged["updated_at"].fillna(now_local_iso())
-
+    # Guardar
     APP_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    merged.to_csv(APP_HISTORY_PATH, index=False)
+    out.to_csv(APP_HISTORY_PATH, index=False)
     GH_PATH.parent.mkdir(parents=True, exist_ok=True)
-    merged.to_csv(GH_PATH, index=False)
-
-    log.info(f"[OK] meteo_history.csv actualizado: {merged['date'].min()} → {merged['date'].max()} | filas={len(merged)}")
-    log.info(f"NaN tmax={int(merged['tmax'].isna().sum())} tmin={int(merged['tmin'].isna().sum())} prec={int(merged['prec'].isna().sum())}")
+    out.to_csv(GH_PATH, index=False)
 
 if __name__ == "__main__":
     main()
