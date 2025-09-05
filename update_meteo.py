@@ -1,216 +1,275 @@
-# -*- coding: utf-8 -*-
-"""
-update_meteo.py — Autoupdate histórico a partir del pronóstico MeteoBahía.
-- Lee/parsea el XML (robusto a <tag value="..."> o texto).
-- Fusiona con histórico existente (repo y/o local).
-- Asegura continuidad diaria hasta el horizonte (hoy + N).
-- Guarda en data/meteo_daily.csv y (opcional) en meteo_history.csv para la app.
-"""
+# update_meteo.py
+# Consolida y ARCHIVA el horizonte fijo 2025-09-01 → 2026-01-01 (exclusivo)
+# - Congela pronósticos pasados
+# - Actualiza sólo futuros
+# - Asegura continuidad diaria y genera snapshots
 
 import os
+import io
 import sys
+import csv
+import math
+import json
+import time
 import pytz
+import shutil
+import zipfile
+import logging
 import datetime as dt
-import pandas as pd
-import numpy as np
-import xml.etree.ElementTree as ET
-from urllib.request import urlopen, Request
-from urllib.error import HTTPError, URLError
 from pathlib import Path
+from typing import List, Dict, Optional
+import pandas as pd
 
-# ================== Config ==================
-API_URL         = os.getenv("METEOBAHIA_URL", "https://meteobahia.com.ar/scripts/forecast/for-bb.xml")
-PRON_DIAS_API   = int(os.getenv("PRON_DIAS_API", "8"))   # hoy + 7
-TZ              = pytz.timezone(os.getenv("TIMEZONE", "America/Argentina/Buenos_Aires"))
+import xml.etree.ElementTree as ET
+import requests
 
-# Salidas (repo y app)
-CSV_REPO_PATH   = os.getenv("GH_PATH", "data/meteo_daily.csv")  # usado por workflows/analítica
-CSV_APP_PATH    = os.getenv("APP_HISTORY_PATH", "meteo_history.csv")  # leído por la app si querés
+# ================== CONFIG ==================
+TZ = os.getenv("TIMEZONE", "America/Argentina/Buenos_Aires")
+LOCAL_TZ = pytz.timezone(TZ)
 
-# ================== Utils ==================
-def ensure_dir(path: str):
-    d = os.path.dirname(path)
-    if d and not os.path.exists(d):
-        os.makedirs(d, exist_ok=True)
+WINDOW_START = dt.date(2025, 9, 1)
+WINDOW_END   = dt.date(2026, 1, 1)   # EXCLUSIVO (no se incluye el 01-ene-2026)
 
-def today_local():
-    return dt.datetime.now(TZ).date()
+# URL por defecto (Bordenave, 'bd'); podés cambiar a 'bb' si querés Bahía Blanca
+METEOBAHIA_URL = os.getenv(
+    "METEOBAHIA_URL",
+    "https://meteobahia.com.ar/scripts/forecast/for-bd.xml"
+)
 
-def _get_attr_or_text(elem, attr="value"):
+# Días de pronóstico que se usan de la API
+PRON_DIAS_API = int(os.getenv("PRON_DIAS_API", "8"))
+
+# Rutas de salida
+APP_HISTORY_PATH = Path(os.getenv("APP_HISTORY_PATH", "meteo_history.csv"))
+GH_PATH = Path(os.getenv("GH_PATH", "data/meteo_daily.csv"))
+
+ARCHIVES_DIR = Path("data/archives")
+ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
+GH_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# ================== LOGGING ==================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+log = logging.getLogger("update_meteo")
+
+# ================== HELPERS ==================
+def now_local_iso() -> str:
+    return dt.datetime.now(tz=LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S%z")
+
+def daterange(start: dt.date, end_exclusive: dt.date):
+    for n in range((end_exclusive - start).days):
+        yield start + dt.timedelta(days=n)
+
+def _num(x) -> Optional[float]:
+    if x is None:
+        return None
+    try:
+        s = str(x).strip().replace(",", ".")
+        if s == "":
+            return None
+        return float(s)
+    except:
+        return None
+
+def _text(elem: ET.Element) -> str:
+    if elem is None:
+        return ""
+    if elem.text is not None and elem.text.strip() != "":
+        return elem.text.strip()
+    # value en atributo
+    v = elem.attrib.get("value")
+    return (v or "").strip()
+
+def _find_first(elem: ET.Element, names: List[str]) -> Optional[ET.Element]:
+    """Busca primer subtag cuyo tag en minúsculas esté en names."""
     if elem is None:
         return None
-    # primero intento atributo (p.ej. <tmax value="25.1"/>)
-    v = (elem.attrib or {}).get(attr)
-    if v is not None and str(v).strip():
-        return str(v).strip()
-    # si no, uso el texto interno (<tmax>25.1</tmax>)
-    t = (elem.text or "").strip()
-    return t if t else None
+    low = set(n.lower() for n in names)
+    for child in list(elem):
+        if child.tag.lower() in low:
+            return child
+    # búsqueda recursiva superficial
+    for child in list(elem):
+        for gchild in list(child):
+            if gchild.tag.lower() in low:
+                return gchild
+    return None
 
-def parse_api_xml(url: str):
-    """Devuelve lista de dicts con date, tmax, tmin, prec, source='forecast'."""
-    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urlopen(req, timeout=30) as r:
-        xml_bytes = r.read()
+def _get_tag_text(elem: ET.Element, names: List[str]) -> str:
+    sub = _find_first(elem, names)
+    return _text(sub)
+
+def parse_meteobahia_xml(xml_bytes: bytes, limit_days: int) -> pd.DataFrame:
+    """
+    Intenta parsear varios esquemas posibles.
+    Debe devolver columnas: date (YYYY-MM-DD), tmin, tmax, prec.
+    """
     root = ET.fromstring(xml_bytes)
 
-    out = []
-    # Soportar estructura con <day> y subtags con atributo value="..."
-    for day in root.iter():
-        if day.tag.lower().endswith("day"):
-            # Buscar sub-tags típicos
-            fecha = None
-            tmax = tmin = prec = None
+    # Heurística: recolectar nodos candidatos a "día"
+    day_candidates = []
+    for node in root.iter():
+        tag = node.tag.lower()
+        # nombres típicos
+        if tag in {"dia", "day", "item", "pronostico", "forecastday"}:
+            # que tengan algún rastro de fecha o variables
+            txt = ET.tostring(node, encoding="unicode").lower()
+            if any(k in txt for k in ["fecha", "date", "tmin", "tmax", "min", "max", "prec", "lluv"]):
+                day_candidates.append(node)
 
-            # nombres usuales
-            fecha_tag  = day.find("fecha")
-            tmax_tag   = day.find("tmax")
-            tmin_tag   = day.find("tmin")
-            precip_tag = day.find("precip")
+    rows = []
+    for node in day_candidates:
+        # fecha en distintos campos
+        fecha_txt = (
+            _get_tag_text(node, ["fecha", "date", "dia"]) or
+            node.attrib.get("fecha", "") or
+            node.attrib.get("date", "")
+        ).strip()
 
-            if fecha_tag is not None:
-                fecha = _get_attr_or_text(fecha_tag, "value")
+        # Normalizar fecha
+        fdate = None
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+            try:
+                fdate = dt.datetime.strptime(fecha_txt, fmt).date()
+                break
+            except:
+                pass
 
-            if tmax_tag is not None:
-                tmax_s = _get_attr_or_text(tmax_tag, "value")
-                if tmax_s is not None:
-                    try: tmax = float(str(tmax_s).replace(",", "."))
-                    except: pass
+        # Si no encontramos fecha, intentar si el nodo tiene índice relativo (poco común)
+        if fdate is None:
+            # saltar si no hay fecha clara
+            continue
 
-            if tmin_tag is not None:
-                tmin_s = _get_attr_or_text(tmin_tag, "value")
-                if tmin_s is not None:
-                    try: tmin = float(str(tmin_s).replace(",", "."))
-                    except: pass
+        tmin = _num(_get_tag_text(node, ["tmin", "min", "mintemp"]))
+        tmax = _num(_get_tag_text(node, ["tmax", "max", "maxtemp"]))
+        # precipitación
+        prec_raw = _get_tag_text(node, ["prec", "lluvia", "pp", "rain", "precipitacion"])
+        # algunos esquemas devuelven "12.3 mm"
+        prec = None
+        if prec_raw:
+            prec = _num(prec_raw.replace("mm", "").strip())
 
-            if precip_tag is not None:
-                prec_s = _get_attr_or_text(precip_tag, "value")
-                if prec_s is not None:
-                    try: prec = float(str(prec_s).replace(",", "."))
-                    except: pass
+        rows.append({"date": fdate, "tmin": tmin, "tmax": tmax, "prec": prec})
 
-            # fallback genérico si no estaban esos nombres
-            if fecha is None:
-                for child in day:
-                    tag = child.tag.lower()
-                    val = _get_attr_or_text(child, "value")
-                    if "date" in tag or "fecha" in tag:
-                        fecha = fecha or val
-                    elif "tmax" in tag or ("max" in tag and "t" in tag):
-                        if tmax is None and val is not None:
-                            try: tmax = float(val.replace(",", "."))
-                            except: pass
-                    elif "tmin" in tag or ("min" in tag and "t" in tag):
-                        if tmin is None and val is not None:
-                            try: tmin = float(val.replace(",", "."))
-                            except: pass
-                    elif "prec" in tag or "rain" in tag or "pp" in tag:
-                        if prec is None and val is not None:
-                            try: prec = float(val.replace(",", "."))
-                            except: pass
+    if not rows:
+        # fallback: sin datos
+        return pd.DataFrame(columns=["date", "tmin", "tmax", "prec"]).astype(
+            {"date": "datetime64[ns]"}
+        )
 
-            # Normalizar fecha
-            d = None
-            for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
-                if fecha:
-                    try:
-                        d = dt.datetime.strptime(fecha, fmt).date()
-                        break
-                    except:
-                        continue
-
-            if d is None or tmax is None or tmin is None:
-                continue
-            if prec is None:
-                prec = 0.0
-
-            out.append({"date": d, "tmax": tmax, "tmin": tmin, "prec": prec, "source": "forecast"})
-    return out
-
-def load_existing(csv_path: str) -> pd.DataFrame:
-    if not os.path.exists(csv_path):
-        return pd.DataFrame(columns=["date","jd","tmax","tmin","prec","source","updated_at"])
-    df = pd.read_csv(csv_path, parse_dates=["date","updated_at"], dayfirst=False)
-    df["date"] = df["date"].dt.date
+    df = pd.DataFrame(rows).sort_values("date").drop_duplicates("date", keep="last")
+    # recortar a los primeros limit_days desde hoy si fuera necesario
+    today = dt.date.today()
+    horizon_end = today + dt.timedelta(days=max(0, limit_days - 1))
+    df = df[(df["date"] >= pd.Timestamp(today)) & (df["date"] <= pd.Timestamp(horizon_end))]
     return df
 
-def save_csv(df: pd.DataFrame, path: str):
-    ensure_dir(path)
-    df2 = df.sort_values("date").copy()
-    df2.to_csv(path, index=False)
+def load_history(path: Path) -> pd.DataFrame:
+    if path.exists():
+        df = pd.read_csv(path, parse_dates=["date"], dayfirst=False)
+        # normalizar nombres
+        cols = {c.lower(): c for c in df.columns}
+        df.columns = [c.lower() for c in df.columns]
+        # asegurar columnas mínimas
+        for c in ["tmax", "tmin", "prec", "source", "updated_at"]:
+            if c not in df.columns:
+                df[c] = None
+        return df[["date", "tmax", "tmin", "prec", "source", "updated_at"]].copy()
+    else:
+        return pd.DataFrame(columns=["date", "tmax", "tmin", "prec", "source", "updated_at"])
 
-# ================== Main ==================
+def save_snapshot(current_df: pd.DataFrame):
+    ts = dt.datetime.now(LOCAL_TZ).strftime("%Y%m%d_%H%M%S")
+    snap_path = ARCHIVES_DIR / f"meteo_history_{ts}.csv"
+    current_df.to_csv(snap_path, index=False)
+
+# ================== MAIN PIPELINE ==================
 def main():
-    today = today_local()
-    horizon_end = today + dt.timedelta(days=PRON_DIAS_API - 1)
+    log.info("=== UPDATE METEO (Ventana fija 2025-09-01 → 2026-01-01 exclusivo) ===")
+    log.info(f"TZ={TZ} | URL={METEOBAHIA_URL} | PRON_DIAS_API={PRON_DIAS_API}")
+    today = dt.date.today()
 
-    # Cargar históricos existentes (repo y app si existieran) y unirlos
-    df_repo = load_existing(CSV_REPO_PATH)
-    df_app  = load_existing(CSV_APP_PATH)
-    if df_repo.empty and df_app.empty:
-        df_hist = pd.DataFrame(columns=["date","jd","tmax","tmin","prec","source","updated_at"])
-    else:
-        both = pd.concat([df_repo, df_app], ignore_index=True)
-        both = (both.drop_duplicates(subset=["date"], keep="last")
-                    .sort_values("date")
-                    .reset_index(drop=True))
-        df_hist = both
+    # 1) Leer histórico previo
+    hist = load_history(APP_HISTORY_PATH)
+    log.info(f"Histórico cargado: {len(hist)} filas" if not hist.empty else "Sin histórico previo")
 
-    # Leer pronóstico
+    # 2) Descargar pronóstico
     try:
-        forecast = parse_api_xml(API_URL)
-    except (HTTPError, URLError, ET.ParseError) as e:
-        print(f"[WARN] No se pudo leer la API: {e}", file=sys.stderr)
-        forecast = []
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; MeteoCollector/1.0; +https://example.org)"
+        }
+        resp = requests.get(METEOBAHIA_URL, headers=headers, timeout=30)
+        resp.raise_for_status()
+        api_df = parse_meteobahia_xml(resp.content, PRON_DIAS_API)
+        log.info(f"API parseada: {len(api_df)} días (desde hoy)")
+    except Exception as e:
+        log.error(f"No se pudo descargar/parsear API: {e}")
+        api_df = pd.DataFrame(columns=["date", "tmin", "tmax", "prec"])
 
-    fdf = pd.DataFrame(forecast)
-    if not fdf.empty:
-        fdf = fdf[(fdf["date"] >= today) & (fdf["date"] <= horizon_end)]
-        fdf["jd"] = fdf["date"].apply(lambda d: d.timetuple().tm_yday)
-        fdf["updated_at"] = pd.Timestamp.now(TZ)
+    # 3) Construir índice diario completo para la ventana fija
+    idx = pd.to_datetime([d for d in daterange(WINDOW_START, WINDOW_END)])
+    base = pd.DataFrame({"date": idx})
+
+    # 4) Unir histórico congelado + pronóstico futuro (sin pisar pasado)
+    # Normalizar tipos
+    for df in (hist, api_df):
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"]).dt.date
+
+    base["date"] = base["date"].dt.date
+
+    # a) Usar histórico existente dentro de la ventana (congelado)
+    if not hist.empty:
+        hist_win = hist[hist["date"].between(WINDOW_START, WINDOW_END - dt.timedelta(days=1))]
     else:
-        # Sin datos de API: igual mantenemos el horizonte para no cortar la serie
-        dates = pd.date_range(today, horizon_end, freq="D").date
-        fdf = pd.DataFrame({
-            "date": dates,
-            "tmax": np.nan, "tmin": np.nan, "prec": np.nan,
-            "source": "forecast",
-            "jd": [d.timetuple().tm_yday for d in dates],
-            "updated_at": pd.Timestamp.now(TZ)
-        })
+        hist_win = pd.DataFrame(columns=["date", "tmax", "tmin", "prec", "source", "updated_at"])
 
-    # Fusionar: reemplazar ventana [today, horizon_end] con la API más reciente
-    if df_hist.empty:
-        merged = fdf.copy()
+    # b) Preparar el pronóstico para fechas futuras (>= hoy)
+    if not api_df.empty:
+        api_df["source"] = "forecast"
+        api_df["updated_at"] = now_local_iso()
+        api_future = api_df[api_df["date"] >= today]
     else:
-        lo, hi = fdf["date"].min(), fdf["date"].max()
-        mask = (df_hist["date"] >= lo) & (df_hist["date"] <= hi)
-        merged = pd.concat([df_hist.loc[~mask].copy(), fdf.copy()], ignore_index=True)
+        api_future = pd.DataFrame(columns=["date", "tmax", "tmin", "prec", "source", "updated_at"])
 
-    # Asegurar continuidad desde el mínimo disponible hasta horizon_end
-    min_date = merged["date"].min() if not merged.empty else today
-    full_idx = pd.date_range(min_date, horizon_end, freq="D").date
-    merged = (merged.set_index("date")
-                    .reindex(full_idx)
-                    .reset_index()
-                    .rename(columns={"index":"date"}))
+    # c) Merge: primero histórico (pasado congelado), luego insertamos futuros de API
+    merged = base.merge(
+        hist_win, on="date", how="left", suffixes=("", "_hist")
+    )
 
-    # Completar columnas clave
-    merged["jd"]         = merged["date"].apply(lambda d: d.timetuple().tm_yday)
-    merged["updated_at"] = merged["updated_at"].fillna(pd.Timestamp.now(TZ))
-    # Imputación conservadora (sin dejar NaN)
-    merged["tmax"]   = pd.to_numeric(merged["tmax"], errors="coerce").fillna(method="ffill")
-    merged["tmin"]   = pd.to_numeric(merged["tmin"], errors="coerce").fillna(method="ffill")
-    merged["prec"]   = pd.to_numeric(merged["prec"], errors="coerce").fillna(0.0)
+    # Para cada fecha futura, si hay API, reemplazar/poner valores; para pasada, conservar histórico
+    if not api_future.empty:
+        fut = merged["date"] >= today
+        merged = merged.merge(
+            api_future, on="date", how="left", suffixes=("", "_api")
+        )
+
+        for col in ["tmax", "tmin", "prec", "source", "updated_at"]:
+            # si es futuro y hay valor de API, usarlo; si no, dejar lo existente
+            merged[col] = merged[col].where(~fut | merged[f"{col}_api"].isna(), merged[f"{col}_api"])
+
+        # limpiar columnas *_api
+        drop_cols = [c for c in merged.columns if c.endswith("_api") or c.endswith("_hist")]
+        merged = merged.drop(columns=drop_cols, errors="ignore")
+
+    # 5) Rellenos conservadores para continuidad (sin pisar valores existentes)
+    merged = merged.sort_values("date")
+    for col in ["tmax", "tmin"]:
+        # ffill sólo donde esté NaN
+        merged[col] = merged[col].astype(float)
+        merged[col] = merged[col].fillna(method="ffill")
+
+    # Precipitación: NaN -> 0.0
+    merged["prec"] = merged["prec"].astype(float)
+    merged["prec"] = merged["prec"].fillna(0.0)
+
+    # Completar metadatos mínimos
     merged["source"] = merged["source"].fillna("forecast")
+    merged["updated_at"] = merged["updated_at"].fillna(now_local_iso())
 
-    # Guardar en ambas rutas (repo + app)
-    save_csv(merged, CSV_REPO_PATH)
-    if CSV_APP_PATH:
-        save_csv(merged, CSV_APP_PATH)
-
-    print(f"[OK] Histórico actualizado hasta {horizon_end} | filas={len(merged)} "
-          f"| rango={merged['date'].min()} → {merged['date'].max()}")
-
-if __name__ == "__main__":
-    main()
+    # 6) Guardar salidas
+    out_df = merged.copy()
+    out_df.to_csv(APP_HISTORY_PATH, index=False)
+    out_df.to_csv(GH_PA_
