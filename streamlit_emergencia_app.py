@@ -14,7 +14,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 # ================== Config de página ==================
-st.set_page_config(page_title="Predicción de Emergencia Agrícola EUPHO – BORDENAVE", layout="wide")
+st.set_page_config(page_title="Predicción de Emergencia Agrícola EUPHO – Bahia Blanca", layout="wide")
 
 # ================== UX: embebido y recarga ==================
 def _get_query_params():
@@ -60,7 +60,7 @@ EMEAC_MIN_DEN = 5.0   # Banda inferior
 EMEAC_MAX_DEN = 15.0  # Banda superior
 
 # API Bahía Blanca
-API_URL = "https://meteobahia.com.ar/scripts/forecast/for-bd.xml"
+API_URL = "https://meteobahia.com.ar/scripts/forecast/for-bb.xml"
 
 # Ventana conceptual (para recorte y para los ejes de los gráficos)
 VENTANA_MIN = pd.Timestamp("2025-09-01")
@@ -240,7 +240,7 @@ def update_history(df_new: pd.DataFrame, freeze_existing: bool = False) -> pd.Da
     return merged
 
 # ================== App (UI) ==================
-st.title("Predicción de Emergencia Agrícola EUPHO –BORDENAVE")
+st.title("Predicción de Emergencia Agrícola EUPHO –Bahia Blanca")
 
 st.sidebar.header("Configuración")
 umbral_usuario = st.sidebar.number_input(
