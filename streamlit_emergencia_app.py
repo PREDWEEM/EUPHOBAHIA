@@ -215,3 +215,54 @@ st.download_button(
     "resultados_predweem_horizonte_history.csv",
     "text/csv"
 )
+
+with st.expander("🔍 QA de consistencia EMERREL/EMEAC"):
+    # 1) Tipos y NaN
+    emerrel_ok_num = pd.api.types.is_numeric_dtype(pred["EMERREL(0-1)"])
+    emeac_ok_num   = pd.api.types.is_numeric_dtype(pred["EMEAC(0-1)"])
+    emerrel_no_nan = not pred["EMERREL(0-1)"].isna().any()
+    emeac_no_nan   = not pred["EMEAC(0-1)"].isna().any()
+
+    # 2) Invariantes
+    emeac_monot = pred["EMEAC(0-1)"].is_monotonic_increasing
+    emeac_bounds = float(pred["EMEAC(0-1)"].min()) >= 0.0 and float(pred["EMEAC(0-1)"].max()) <= 1.0 + 1e-9
+    emerrel_nonneg = (pred["EMERREL(0-1)"] >= -1e-9).mean() >= 0.99
+
+    # 3) Consistencia EMEAC vs suma de EMERREL
+    acc_from_emerrel = pred["EMERREL(0-1)"].cumsum()
+    residual = (pred["EMEAC(0-1)"] - acc_from_emerrel).astype(float)
+    rmse = float((residual**2).mean()**0.5) if len(residual) else 0.0
+
+    cols = st.columns(2)
+    with cols[0]:
+        st.write("**Tipos/NaN**")
+        st.write({"emerrel_numeric": emerrel_ok_num,
+                  "emeac_numeric": emeac_ok_num,
+                  "no_nan_emerrel": emerrel_no_nan,
+                  "no_nan_emeac": emeac_no_nan})
+    with cols[1]:
+        st.write("**Invariantes**")
+        st.write({"emeac_monotonic_non_decreasing": emeac_monot,
+                  "emeac_bounds_0_1": emeac_bounds,
+                  "emerrel_non_negative_mostly": emerrel_nonneg,
+                  "consistency_emerrel_to_emeac_RMSE": rmse})
+
+    if not (emerrel_ok_num and emeac_ok_num and emerrel_no_nan and emeac_no_nan and emeac_monot and emeac_bounds and emerrel_nonneg):
+        st.warning("⚠️ Algún check falló. Revisá NaN/tipos en meteo_history.csv o activá imputación cauta (ver abajo).")
+
+    # (Opcional) Imputación cauta antes de modelar: descomentá para usar
+    st.markdown("""
+    <details><summary><b>Imputación cauta sugerida (opcional)</b></summary>
+    <pre>
+    # Antes de armar X:
+    # dfh[["TMAX","TMIN"]] = dfh[["TMAX","TMIN"]].ffill(limit=1)
+    # dfh["Prec"] = dfh["Prec"].fillna(0)
+    # dfh = dfh.dropna(subset=["TMAX","TMIN","Prec"])
+    </pre>
+    </details>
+    """, unsafe_allow_html=True)
+
+
+
+
+
