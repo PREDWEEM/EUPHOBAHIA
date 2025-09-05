@@ -135,7 +135,13 @@ pred = pd.DataFrame({
     "EMERREL(0-1)": emerrel,
     "EMEAC(0-1)": emeac01
 })
-pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(5, 1).mean()
+
+# --- Robust: asegurar numérico antes de rolling ---
+for _c in ["EMERREL(0-1)", "EMEAC(0-1)"]:
+    if _c in pred.columns:
+        pred[_c] = pd.to_numeric(pred[_c], errors="coerce")
+pred["EMERREL(0-1)"] = pred["EMERREL(0-1)"].fillna(0)
+pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1).mean()
 pred["EMEAC(%)"] = (pred["EMEAC(0-1)"] * 100).clip(0, 100)
 
 # Clasificación simple del nivel diario según EMERREL
