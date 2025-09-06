@@ -6,8 +6,8 @@
 #   A) date, tmax, tmin, prec [, jd, source, updated_at]
 #   B) Fecha, Julian_days, TMAX, TMIN, Prec
 #
-# Gráficos: EMERREL diario (barras + MA5), EMEAC (%) (curva con banda mín/máx),
-# y tabla con emojis de nivel final.
+# Gráficos: EMERREL diario (barras + MA5 + relleno tricolor interno),
+# EMEAC (%) (curva con banda mín/máx) y tabla con emojis de nivel final.
 
 from pathlib import Path
 import streamlit as st
@@ -61,13 +61,11 @@ class PracticalANNModel:
     def predict(self, X):
         Xn = self._normalize_input(X.astype(float))
         # Capa oculta (20 neuronas), salida 1 neurona
-        # Forma: IW.T @ x (4x20) + bias(20,)
         z1 = Xn @ self.IW + self.bias_IW  # (N,20)
         a1 = self._tansig(z1)             # (N,20)
         z2 = a1 @ self.LW + self.bias_out # (N,)
         y  = self._tansig(z2)             # (N,)
-        emerrel_01 = self._denorm_output(y)  # (N,) en [0..1]
-        # Convertimos a EMEAC acumulado normalizado por un máximo de referencia
+        emerrel_01 = self._denorm_output(y)            # (N,) en [0..1]
         valor_max_emeac = 8.05
         emer_ac = np.cumsum(emerrel_01) / valor_max_emeac  # (N,)
         emerrel_diff = np.diff(emer_ac, prepend=0.0)
@@ -76,6 +74,19 @@ class PracticalANNModel:
 @st.cache_resource
 def get_model():
     return PracticalANNModel()
+
+# ======== Colores globales consistentes ========
+HEX_GREEN  = "#00A651"   # verde
+HEX_YELLOW = "#FFC000"   # amarillo
+HEX_RED    = "#E53935"   # rojo
+
+def rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+COLOR_MAP_HEX = {"Bajo": HEX_GREEN, "Medio": HEX_YELLOW, "Alto": HEX_RED}
+MAP_NIVEL_ICONO = {"Bajo": "🟢 Bajo", "Medio": "🟡 Medio", "Alto": "🔴 Alto"}
 
 # ======== Carga robusta del CSV (solo filas existentes) ========
 def load_history_only(csv_path: Path) -> pd.DataFrame:
@@ -93,11 +104,9 @@ def load_history_only(csv_path: Path) -> pd.DataFrame:
         # Esquema A
         df = pd.read_csv(csv_path, parse_dates=["date"])
         if not {"date","tmax","tmin","prec"}.issubset(df.columns):
-            # No es A ni B: devuelvo vacío
             return pd.DataFrame(columns=["Fecha","Julian_days","TMAX","TMIN","Prec"])
         df = df.rename(columns={"date":"Fecha","tmax":"TMAX","tmin":"TMIN","prec":"Prec"})
         df["Fecha"] = pd.to_datetime(df["Fecha"]).dt.normalize()
-        # Si no hay Julian_days, lo construimos relativo al primer día del CSV
         df = df.sort_values("Fecha").reset_index(drop=True)
         first = df["Fecha"].min()
         df["Julian_days"] = (df["Fecha"] - first).dt.days + 1
@@ -105,8 +114,7 @@ def load_history_only(csv_path: Path) -> pd.DataFrame:
     # Coerción numérica y saneo básico
     for c in ["TMAX","TMIN","Prec"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    # Precipitaciones negativas no (clip 0)
-    df["Prec"] = df["Prec"].fillna(0).clip(lower=0)
+    df["Prec"] = df["Prec"].fillna(0).clip(lower=0)  # no negativos
     df = (df.dropna(subset=["Fecha"])
             .drop_duplicates("Fecha")
             .sort_values("Fecha")
@@ -141,7 +149,7 @@ for _c in ["EMERREL(0-1)", "EMEAC(0-1)"]:
     if _c in pred.columns:
         pred[_c] = pd.to_numeric(pred[_c], errors="coerce")
 pred["EMERREL(0-1)"] = pred["EMERREL(0-1)"].fillna(0)
-# --- Garantía EMEAC: si falta o es nulo, lo recalculo desde EMERREL ---
+# --- Garantía EMEAC ---
 if "EMEAC(0-1)" not in pred.columns or pred["EMEAC(0-1)"].isna().all():
     _acc = pred["EMERREL(0-1)"].cumsum()
     _den = 8.05  # máximo de referencia
@@ -150,9 +158,7 @@ else:
     pred["EMEAC(0-1)"] = pd.to_numeric(pred["EMEAC(0-1)"], errors="coerce").fillna(0)
 
 pred["EMEAC(%)"] = (pred["EMEAC(0-1)"] * 100).clip(0, 100)
-
 pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(window=5, min_periods=1).mean()
-pred["EMEAC(%)"] = (pred["EMEAC(0-1)"] * 100).clip(0, 100)
 
 # Clasificación simple del nivel diario según EMERREL
 THR_BAJO_MEDIO = 0.02
@@ -164,25 +170,63 @@ def nivel(v):
 pred["Nivel"] = pred["EMERREL(0-1)"].apply(nivel)
 
 # ======== Gráfico EMERREL diario ========
-st.subheader("EMERREL diario (barras) + MA5 (línea)")
-colores = pred["Nivel"].map({"Bajo":"#2ca02c","Medio":"#ff7f0e","Alto":"#d62728"}).fillna("#808080")
+st.subheader("EMERREL diario (barras) + MA5 (línea) + relleno tricolor interno")
+# Barras por nivel (paleta consistente)
+bar_colors = pred["Nivel"].map(COLOR_MAP_HEX).fillna("#B0B0B0")
+
 fig1 = go.Figure()
 fig1.add_bar(
     x=pred["Fecha"],
     y=pred["EMERREL(0-1)"],
-    marker=dict(color=colores),
+    marker=dict(color=bar_colors),
     customdata=pred["Nivel"],
     hovertemplate="Fecha: %{x|%d-%b-%Y}<br>EMERREL: %{y:.3f}<br>Nivel: %{customdata}<extra></extra>",
     name="EMERREL"
 )
+
+# --- Relleno tricolor INTERNO bajo la MA5 ---
+x = pred["Fecha"]
+ma = pred["EMERREL_MA5"].fillna(0.0).clip(lower=0.0).to_numpy()
+
+y_low = float(THR_BAJO_MEDIO)   # verde hasta aquí
+y_med = float(THR_MEDIO_ALTO)   # amarillo hasta aquí; de ahí en más rojo
+
+# Topes de cada banda
+y0 = np.zeros_like(ma)
+y1 = np.minimum(ma, y_low)   # [0 .. y_low] -> verde
+y2 = np.minimum(ma, y_med)   # [y_low .. y_med] -> amarillo (rellena contra y1)
+y3 = ma                      # [y_med .. ma] -> rojo (rellena contra y2)
+
+ALPHA = 0.28  # opacidad suave
+fig1.add_trace(go.Scatter(x=x, y=y0, mode="lines",
+                          line=dict(width=0), hoverinfo="skip", showlegend=False))
+fig1.add_trace(go.Scatter(x=x, y=y1, mode="lines",
+                          line=dict(width=0), fill="tonexty", fillcolor=rgba(HEX_GREEN, ALPHA),
+                          hoverinfo="skip", showlegend=False, name="Zona baja"))
+fig1.add_trace(go.Scatter(x=x, y=y1, mode="lines",
+                          line=dict(width=0), hoverinfo="skip", showlegend=False))
+fig1.add_trace(go.Scatter(x=x, y=y2, mode="lines",
+                          line=dict(width=0), fill="tonexty", fillcolor=rgba(HEX_YELLOW, ALPHA),
+                          hoverinfo="skip", showlegend=False, name="Zona media"))
+fig1.add_trace(go.Scatter(x=x, y=y2, mode="lines",
+                          line=dict(width=0), hoverinfo="skip", showlegend=False))
+fig1.add_trace(go.Scatter(x=x, y=y3, mode="lines",
+                          line=dict(width=0), fill="tonexty", fillcolor=rgba(HEX_RED, ALPHA),
+                          hoverinfo="skip", showlegend=False, name="Zona alta"))
+
+# Línea de MA5 por encima
 fig1.add_scatter(
     x=pred["Fecha"],
     y=pred["EMERREL_MA5"],
     mode="lines",
+    line=dict(color="black", width=2),
     name="MA5"
 )
+
 # Eje razonable para tu escala
 fig1.update_yaxes(range=[0, 0.08])
+fig1.update_layout(xaxis_title="Fecha", yaxis_title="EMERREL (0-1)",
+                   hovermode="x unified", legend_title="Referencias", height=560)
 st.plotly_chart(fig1, use_container_width=True)
 
 # ======== Gráfico EMEAC (%) ========
@@ -197,16 +241,19 @@ emeac_max = (acc / EMEAC_MAX_DEN * 100).clip(0, 100)
 
 fig2 = go.Figure()
 fig2.add_scatter(x=pred["Fecha"], y=emeac_min, mode="lines", line=dict(width=0), name="EMEAC mín")
-fig2.add_scatter(x=pred["Fecha"], y=emeac_max, mode="lines", line=dict(width=0), fill="tonexty", name="EMEAC máx")
-fig2.add_scatter(x=pred["Fecha"], y=pred["EMEAC(%)"], mode="lines", name="EMEAC (%) (modelo)")
+fig2.add_scatter(x=pred["Fecha"], y=emeac_max, mode="lines", line=dict(width=0),
+                 fill="tonexty", fillcolor="rgba(120,120,120,0.20)", name="EMEAC máx")
+fig2.add_scatter(x=pred["Fecha"], y=pred["EMEAC(%)"], mode="lines",
+                 line=dict(width=2.5), name="EMEAC (%) (modelo)")
 fig2.update_yaxes(range=[0, 100])
+fig2.update_layout(xaxis_title="Fecha", yaxis_title="EMEAC (%)",
+                   hovermode="x unified", legend_title="Referencias", height=520)
 st.plotly_chart(fig2, use_container_width=True)
 
 # ======== Tabla ========
 st.subheader("Resultados diarios (horizonte del CSV)")
-iconos = {"Bajo":"🟢 Bajo", "Medio":"🟠 Medio", "Alto":"🔴 Alto"}
 tabla = pred[["Fecha","Julian_days","EMERREL(0-1)","EMERREL_MA5","EMEAC(%)","Nivel"]].copy()
-tabla["Nivel"] = tabla["Nivel"].map(iconos)
+tabla["Nivel"] = tabla["Nivel"].map(MAP_NIVEL_ICONO)
 st.dataframe(tabla, use_container_width=True)
 
 st.download_button(
@@ -250,7 +297,6 @@ with st.expander("🔍 QA de consistencia EMERREL/EMEAC"):
     if not (emerrel_ok_num and emeac_ok_num and emerrel_no_nan and emeac_no_nan and emeac_monot and emeac_bounds and emerrel_nonneg):
         st.warning("⚠️ Algún check falló. Revisá NaN/tipos en meteo_history.csv o activá imputación cauta (ver abajo).")
 
-    # (Opcional) Imputación cauta antes de modelar: descomentá para usar
     st.markdown("""
     <details><summary><b>Imputación cauta sugerida (opcional)</b></summary>
     <pre>
@@ -261,8 +307,4 @@ with st.expander("🔍 QA de consistencia EMERREL/EMEAC"):
     </pre>
     </details>
     """, unsafe_allow_html=True)
-
-
-
-
 
