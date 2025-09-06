@@ -197,7 +197,7 @@ y1 = np.minimum(ma, y_low)   # [0 .. y_low] -> verde
 y2 = np.minimum(ma, y_med)   # [y_low .. y_med] -> amarillo (rellena contra y1)
 y3 = ma                      # [y_med .. ma] -> rojo (rellena contra y2)
 
-ALPHA = 0.28  # opacidad suave
+ALPHA = 0.70  # opacidad suave
 fig1.add_trace(go.Scatter(x=x, y=y0, mode="lines",
                           line=dict(width=0), hoverinfo="skip", showlegend=False))
 fig1.add_trace(go.Scatter(x=x, y=y1, mode="lines",
