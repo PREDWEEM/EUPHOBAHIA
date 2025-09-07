@@ -170,7 +170,7 @@ def nivel(v):
 pred["Nivel"] = pred["EMERREL(0-1)"].apply(nivel)
 
 # ======== Gráfico EMERREL diario ========
-st.subheader("EMERREL diario (barras) + MA5 (línea) + relleno tricolor interno")
+st.subheader("EMERGENCIA RELATIVA")
 # Barras por nivel (paleta consistente)
 bar_colors = pred["Nivel"].map(COLOR_MAP_HEX).fillna("#B0B0B0")
 
