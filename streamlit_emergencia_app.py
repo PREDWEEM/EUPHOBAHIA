@@ -122,7 +122,7 @@ def load_history_only(csv_path: Path) -> pd.DataFrame:
     return df
 
 # ======== UI ========
-st.title("PREDWEEM — Horizonte tal cual en meteo_history.csv (sin API)")
+st.title("PREDWEEM — EUPHORBIA DAVIDII - BAHIA BLANCA 2025")
 st.caption("La app usa únicamente las filas existentes del CSV. No reindexa ni completa fechas faltantes.")
 
 dfh = load_history_only(CSV_PATH)
