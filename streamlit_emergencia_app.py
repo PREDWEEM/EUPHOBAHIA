@@ -126,6 +126,10 @@ st.title("PREDWEEM — EUPHORBIA DAVIDII - BAHIA BLANCA 2025")
 st.caption("La app usa únicamente las filas existentes del CSV. No reindexa ni completa fechas faltantes.")
 
 dfh = load_history_only(CSV_PATH)
+# --- Fecha de inicio fija del horizonte ---
+fecha_ini_fija = pd.to_datetime("2025-09-04")
+dfh = dfh[dfh["Fecha"] >= fecha_ini_fija].reset_index(drop=True)
+
 if dfh.empty:
     st.error("No hay filas utilizables en meteo_history.csv. Verificá columnas y datos.")
     st.stop()
