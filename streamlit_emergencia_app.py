@@ -81,6 +81,19 @@ class PracticalANNModel:
 def get_model():
     return PracticalANNModel()
 
+class PracticalANNModel:
+    ...
+    def predict(self, X, valor_max_emeac: float = 8.05):
+        Xn = self._normalize_input(X.astype(float))
+        z1 = Xn @ self.IW + self.bias_IW
+        a1 = self._tansig(z1)
+        z2 = a1 @ self.LW + self.bias_out
+        y = self._tansig(z2)
+        emerrel = self._denorm_output(y).clip(0, 1)
+        emeac = np.cumsum(emerrel) / valor_max_emeac
+        return emerrel, emeac
+
+
 # ------------------ COLORES ------------------
 HEX_GREEN, HEX_YELLOW, HEX_RED = "#00A651", "#FFC000", "#E53935"
 COLOR_MAP_HEX = {"Bajo": HEX_GREEN, "Medio": HEX_YELLOW, "Alto": HEX_RED}
