@@ -144,7 +144,7 @@ pred["EMEAC(%)"] = (pred["EMEAC(0-1)"].clip(0, 1) * 100)
 pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(5, min_periods=1).mean()
 
 # ------------------ CLASIFICACIÓN ------------------
-THR_BAJO_MEDIO, THR_MEDIO_ALTO = 0.02, 0.079
+THR_BAJO_MEDIO, THR_MEDIO_ALTO = 0.02, 0.07
 def nivel(v): return "Bajo" if v < THR_BAJO_MEDIO else "Medio" if v <= THR_MEDIO_ALTO else "Alto"
 pred["Nivel"] = pred["EMERREL(0-1)"].apply(nivel)
 
