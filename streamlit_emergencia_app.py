@@ -35,7 +35,6 @@ EMEAC_MAX_DEN = st.sidebar.slider(
 )
 
 # ------------------ MODELO ------------------
-# ------------------ MODELO ------------------
 import numpy as np
 
 class PracticalANNModel:
