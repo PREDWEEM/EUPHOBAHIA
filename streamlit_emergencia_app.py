@@ -66,7 +66,7 @@ class PracticalANNModel:
         z2 = a1 @ self.LW + self.bias_out # (N,)
         y  = self._tansig(z2)             # (N,)
         emerrel_01 = self._denorm_output(y)            # (N,) en [0..1]
-        valor_max_emeac = 10
+        valor_max_emeac = 20.0
         emer_ac = np.cumsum(emerrel_01) / valor_max_emeac  # (N,)
         emerrel_diff = np.diff(emer_ac, prepend=0.0)
         return emerrel_diff, emer_ac
