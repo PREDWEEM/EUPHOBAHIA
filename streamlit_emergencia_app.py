@@ -35,9 +35,11 @@ EMEAC_MAX_DEN = st.sidebar.slider(
 )
 
 # ------------------ MODELO ------------------
+# ------------------ MODELO ------------------
+import numpy as np
+
 class PracticalANNModel:
     def __init__(self):
-        import numpy as np
         self.IW = np.array([
             [-2.924160, -7.896739, -0.977000, 0.554961, 9.510761, 8.739410, 10.592497, 21.705275, -2.532038, 7.847811,
              -3.907758, 13.933289, 3.727601, 3.751941, 0.639185, -0.758034, 1.556183, 10.458917, -1.343551, -14.721089],
@@ -61,13 +63,20 @@ class PracticalANNModel:
         self.input_min = np.array([1.0, 7.7, -3.5, 0.0])
         self.input_max = np.array([148.0, 38.5, 23.5, 59.9])
 
-    def _tansig(self, x): return np.tanh(x)
+    def _tansig(self, x):
+        return np.tanh(x)
+
     def _normalize_input(self, X):
         Xc = np.clip(X, self.input_min, self.input_max)
         return 2 * (Xc - self.input_min) / (self.input_max - self.input_min) - 1
-    def _denorm_output(self, y, ymin=-1.0, ymax=1.0): return (y - ymin) / (ymax - ymin)
 
-    def predict(self, X, valor_max_emeac: float):
+    def _denorm_output(self, y, ymin=-1.0, ymax=1.0):
+        return (y - ymin) / (ymax - ymin)
+
+    def predict(self, X, valor_max_emeac: float = 8.05):
+        """
+        Compatibilidad extendida: si no se pasa valor_max_emeac, usa 8.05 por defecto.
+        """
         Xn = self._normalize_input(X.astype(float))
         z1 = Xn @ self.IW + self.bias_IW
         a1 = self._tansig(z1)
@@ -77,22 +86,10 @@ class PracticalANNModel:
         emeac = np.cumsum(emerrel) / valor_max_emeac
         return emerrel, emeac
 
-@st.cache_resource
+
+# ⚠️ Eliminamos el cacheo para evitar que se guarde la versión antigua del modelo.
 def get_model():
     return PracticalANNModel()
-
-class PracticalANNModel:
-    ...
-    def predict(self, X, valor_max_emeac: float = 8.05):
-        Xn = self._normalize_input(X.astype(float))
-        z1 = Xn @ self.IW + self.bias_IW
-        a1 = self._tansig(z1)
-        z2 = a1 @ self.LW + self.bias_out
-        y = self._tansig(z2)
-        emerrel = self._denorm_output(y).clip(0, 1)
-        emeac = np.cumsum(emerrel) / valor_max_emeac
-        return emerrel, emeac
-
 
 # ------------------ COLORES ------------------
 HEX_GREEN, HEX_YELLOW, HEX_RED = "#00A651", "#FFC000", "#E53935"
