@@ -20,7 +20,7 @@ CSV_PATH = Path("meteo_history.csv")
 st.sidebar.header("⚙️ Parámetros de EMEAC")
 valor_max_emeac = st.sidebar.slider(
     "Valor medio de referencia (denominador de EMEAC)",
-    min_value=5.0, max_value=20.0, value=10.0, step=0.5,
+    min_value=6.0, max_value=18.0, value=9.0, step=0.5,
     help="Controla la velocidad de acumulación: menor = más rápido, mayor = más lento."
 )
 EMEAC_MIN_DEN = st.sidebar.slider(
