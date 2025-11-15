@@ -164,7 +164,7 @@ fig1.add_scatter(
     name="MA5"
 )
 
-fig1.update_yaxes(range=[0, 0.08])
+fig1.update_yaxes(range=[0, 0.15])
 fig1.update_layout(xaxis_title="Fecha", yaxis_title="EMERREL (0-1)",
                    hovermode="x unified", height=560)
 
