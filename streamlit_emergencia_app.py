@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # app_history_horizon_only.py
 # PREDWEEM · Solo con meteo_history.csv
-# Versión simplificada · SOLO EMERREL diaria
+# Versión: SOLO EMERREL_MA5 (sin EMERREL diaria, sin EMEAC)
 
 from pathlib import Path
 import streamlit as st
@@ -18,7 +18,7 @@ CSV_PATH = Path("meteo_history.csv")
 
 # ------------------ SIDEBAR ------------------
 st.sidebar.header("⚙️ Parámetros del modelo")
-st.sidebar.caption("Versión reducida sin EMEAC (solo EMERREL).")
+st.sidebar.caption("Versión reducida (solo EMERREL_MA5).")
 
 
 # ------------------ MODELO (ANN) ------------------
@@ -49,8 +49,7 @@ class PracticalANNModel:
         self.input_min = np.array([1.0, 7.7, -3.5, 0.0])
         self.input_max = np.array([148.0, 38.5, 23.5, 59.9])
 
-    def _tansig(self, x):
-        return np.tanh(x)
+    def _tansig(self, x): return np.tanh(x)
 
     def _normalize_input(self, X):
         Xc = np.clip(X, self.input_min, self.input_max)
@@ -69,23 +68,11 @@ class PracticalANNModel:
         return emerrel
 
 
-def get_model():
-    return PracticalANNModel()
-
-
-# ------------------ COLORACIÓN ------------------
-HEX_GREEN, HEX_YELLOW, HEX_RED = "#00A651", "#FFC000", "#E53935"
-COLOR_MAP_HEX = {"Bajo": HEX_GREEN, "Medio": HEX_YELLOW, "Alto": HEX_RED}
-MAP_NIVEL_ICONO = {"Bajo": "🟢 Bajo", "Medio": "🟡 Medio", "Alto": "🔴 Alto"}
-
-def rgba(hex_color: str, alpha: float):
-    h = hex_color.lstrip("#")
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    return f"rgba({r},{g},{b},{alpha})"
+def get_model(): return PracticalANNModel()
 
 
 # ------------------ CARGA DEL CSV ------------------
-def load_history_only(csv_path: Path) -> pd.DataFrame:
+def load_history_only(csv_path: Path):
     if not csv_path.exists():
         return pd.DataFrame(columns=["Fecha","Julian_days","TMAX","TMIN","Prec"])
 
@@ -104,14 +91,12 @@ def load_history_only(csv_path: Path) -> pd.DataFrame:
 
     df["Prec"] = df["Prec"].fillna(0).clip(lower=0)
 
-    df = df.dropna(subset=["Fecha"]).drop_duplicates("Fecha").sort_values("Fecha").reset_index(drop=True)
-    return df
+    return df.dropna(subset=["Fecha"]).drop_duplicates("Fecha").sort_values("Fecha").reset_index(drop=True)
 
 
 # ------------------ PROCESAMIENTO ------------------
 dfh = load_history_only(CSV_PATH)
 
-# Filtro de horizonte fijo
 fecha_ini_fija = pd.to_datetime("2025-09-04")
 dfh = dfh[dfh["Fecha"] >= fecha_ini_fija].reset_index(drop=True)
 
@@ -135,6 +120,8 @@ pred = pd.DataFrame({
     "Julian_days": dfh["Julian_days"],
     "EMERREL": emerrel
 })
+
+# Suavizado MA5
 pred["EMERREL_MA5"] = pred["EMERREL"].rolling(5, min_periods=1).mean()
 
 
@@ -143,30 +130,30 @@ THR_BAJO_MEDIO, THR_MEDIO_ALTO = 0.02, 0.07
 def nivel(v):
     return "Bajo" if v < THR_BAJO_MEDIO else ("Medio" if v <= THR_MEDIO_ALTO else "Alto")
 
-pred["Nivel"] = pred["EMERREL"].apply(nivel)
+pred["Nivel"] = pred["EMERREL_MA5"].apply(nivel)
 
 
-# ------------------ GRÁFICO EMERREL ------------------
-st.subheader("🌾 EMERGENCIA RELATIVA (EMERREL)")
-bar_colors = pred["Nivel"].map(COLOR_MAP_HEX)
+# ------------------ GRÁFICO (solo EMERREL_MA5) ------------------
+st.subheader("🌾 EMERGENCIA RELATIVA SUAVIZADA (MA5)")
 
 fig1 = go.Figure()
-fig1.add_bar(
-    x=pred["Fecha"], y=pred["EMERREL"],
-    marker=dict(color=bar_colors),
-    customdata=pred["Nivel"],
-    hovertemplate="Fecha: %{x|%d-%b-%Y}<br>EMERREL: %{y:.3f}<br>Nivel: %{customdata}<extra></extra>"
-)
 
 fig1.add_scatter(
-    x=pred["Fecha"], y=pred["EMERREL_MA5"],
-    mode="lines", line=dict(color="black", width=2),
+    x=pred["Fecha"],
+    y=pred["EMERREL_MA5"],
+    mode="lines+markers",
+    line=dict(color="black", width=3),
+    marker=dict(size=6),
     name="MA5"
 )
 
-fig1.update_yaxes(range=[0, 0.55])
-fig1.update_layout(xaxis_title="Fecha", yaxis_title="EMERREL (0-1)",
-                   hovermode="x unified", height=560)
+fig1.update_yaxes(range=[0, 0.08])
+fig1.update_layout(
+    xaxis_title="Fecha",
+    yaxis_title="EMERREL MA5 (0-1)",
+    hovermode="x unified",
+    height=560
+)
 
 st.plotly_chart(fig1, use_container_width=True)
 
@@ -175,17 +162,20 @@ st.plotly_chart(fig1, use_container_width=True)
 st.subheader("📋 Resultados diarios")
 
 tabla = pred.copy()
-tabla["Nivel"] = tabla["Nivel"].map(MAP_NIVEL_ICONO)
+tabla["Nivel"] = tabla["Nivel"].map({
+    "Bajo": "🟢 Bajo",
+    "Medio": "🟡 Medio",
+    "Alto": "🔴 Alto"
+})
 
 st.dataframe(
-    tabla[["Fecha","Julian_days","EMERREL","EMERREL_MA5","Nivel"]],
+    tabla[["Fecha","Julian_days","EMERREL_MA5","Nivel"]],
     use_container_width=True
 )
 
 st.download_button(
     "💾 Descargar resultados (CSV)",
     tabla.to_csv(index=False).encode("utf-8"),
-    "resultados_predweem_sin_emeac.csv",
+    "resultados_predweem_MA5.csv",
     "text/csv"
 )
-
