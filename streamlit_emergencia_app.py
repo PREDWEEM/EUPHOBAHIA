@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # app_history_horizon_only.py
 # PREDWEEM · Solo con meteo_history.csv
-# Versión: SOLO EMERREL_MA5 (sin EMERREL diaria, sin EMEAC)
+# Versión: SOLO EMERREL_MA5 — área sombreada + eje Y hasta 0.55
 
 from pathlib import Path
 import streamlit as st
@@ -121,7 +121,6 @@ pred = pd.DataFrame({
     "EMERREL": emerrel
 })
 
-# Suavizado MA5
 pred["EMERREL_MA5"] = pred["EMERREL"].rolling(5, min_periods=1).mean()
 
 
@@ -133,11 +132,23 @@ def nivel(v):
 pred["Nivel"] = pred["EMERREL_MA5"].apply(nivel)
 
 
-# ------------------ GRÁFICO (solo EMERREL_MA5) ------------------
+# ------------------ GRÁFICO EMERREL_MA5 ------------------
 st.subheader("🌾 EMERGENCIA RELATIVA SUAVIZADA (MA5)")
 
 fig1 = go.Figure()
 
+# Área bajo la curva (relleno suave)
+fig1.add_scatter(
+    x=pred["Fecha"],
+    y=pred["EMERREL_MA5"],
+    mode="lines",
+    line=dict(color="rgba(0,0,0,0)"),
+    fill="tozeroy",
+    fillcolor="rgba(150,150,150,0.25)",
+    showlegend=False
+)
+
+# Línea MA5
 fig1.add_scatter(
     x=pred["Fecha"],
     y=pred["EMERREL_MA5"],
@@ -147,7 +158,7 @@ fig1.add_scatter(
     name="MA5"
 )
 
-fig1.update_yaxes(range=[0, 0.08])
+fig1.update_yaxes(range=[0, 0.55])
 fig1.update_layout(
     xaxis_title="Fecha",
     yaxis_title="EMERREL MA5 (0-1)",
@@ -179,3 +190,4 @@ st.download_button(
     "resultados_predweem_MA5.csv",
     "text/csv"
 )
+
